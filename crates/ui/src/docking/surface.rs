@@ -928,6 +928,13 @@ pub trait DockContent<P> {
     fn window_kind(&self, _panel: &P) -> WindowKind {
         WindowKind::Palette
     }
+    /// Draw shared chrome before this floating window's complete split/tab tree.
+    /// Called once per expanded window, for native and embedded windows alike.
+    /// `ui` is clipped below the title/drag bar. Allocate vertical space at its
+    /// top; the tree receives the remaining bounded height. Root-host chrome is
+    /// drawn by the application before `DockArea::show_content`.
+    fn window_chrome(&mut self, _ui: &mut Ui, _panels: &[P]) {}
+
     /// A native floating window drew its panel bodies (feature `native-windows`): called once
     /// per pass of the window, after its last body, with the window's `ui`. An app that
     /// publishes its own IME descriptor, outside [`crate::ime::Composer`], publishes it here for
@@ -1064,6 +1071,9 @@ impl<P, C: DockContent<P> + ?Sized> DockContent<P> for Overrides<'_, P, C> {
     }
     fn window_kind(&self, panel: &P) -> WindowKind {
         self.inner.window_kind(panel)
+    }
+    fn window_chrome(&mut self, ui: &mut Ui, panels: &[P]) {
+        self.inner.window_chrome(ui, panels);
     }
     fn window_drawn(&mut self, ui: &mut Ui) {
         self.inner.window_drawn(ui);

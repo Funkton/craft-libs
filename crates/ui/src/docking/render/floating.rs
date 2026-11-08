@@ -134,6 +134,18 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     /// and intersections. A minimized window shows the tab strip of its only group, or nothing.
     pub(super) fn floating_body(&mut self, ui: &mut Ui, window: &Floating<P>, body: Rect, frame: Rect) {
         let Some(key) = window.panels().next().cloned() else { return };
+        let body = if window.minimized {
+            body
+        } else {
+            let mut chrome = ui.new_child(egui::UiBuilder::new()
+                .id_salt(self.id.with(("window-chrome", window.id)))
+                .max_rect(body)
+                .layout(egui::Layout::top_down(egui::Align::Min)));
+            chrome.set_clip_rect(body.intersect(ui.clip_rect()));
+            self.content.window_chrome(&mut chrome, &window.panels().cloned().collect::<Vec<_>>());
+            let top = chrome.cursor().top().clamp(body.top(), body.bottom());
+            Rect::from_min_max(pos2(body.left(), top), body.max)
+        };
         match (&window.root, window.minimized) {
             (Node::Tabs { panels, active }, true) => {
                 self.group(ui, panels, *active, true, body, GroupKind::Floating { window: frame });
