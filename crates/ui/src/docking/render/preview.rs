@@ -406,34 +406,40 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     /// nothing changes; a floating group released over itself or a window's title bar moves
     /// there.
     fn drop_group(&mut self, drag: &GroupDrag<P>, pointer: Pos2, float_only: bool) {
+        let (action, empty) = self.group_release(drag, pointer, float_only);
+        // No target: hosts that still apply their own policy for a whole-group release get it.
+        if empty {
+            self.output.group_drop = Some((drag.panel.clone(), pointer));
+        }
+        self.output.actions.extend(action);
+    }
+
+    /// What [`Self::drop_group`] does at `pointer`: the action it applies, and whether the
+    /// drop has no target.
+    fn group_release(&self, drag: &GroupDrag<P>, pointer: Pos2, float_only: bool) -> (Option<Action<P>>, bool) {
         if pointer.distance(drag.origin) < 2.0 {
-            return;
+            return (None, false);
         }
         if !float_only && let Some((action, _)) = self.dock_group_proposal(drag, pointer) {
-            self.output.actions.extend(action);
-            return;
+            return (action, false);
         }
         let floating = matches!(self.place(&drag.panel), Some(Place::Floating { .. }));
         let proposal = if float_only { None } else { self.group_proposal(drag, pointer) };
         if let Some(proposal) = proposal.as_ref().filter(|p| !p.noop) {
             let to = Target::At { anchor: proposal.anchor.clone(), placement: proposal.placement.clone() };
-            self.output.actions.push(group_action(drag, to));
-            return;
+            return (Some(group_action(drag, to)), false);
         }
         // A no-op anchored on another group would change only sizes.
         if proposal.is_some_and(|p| !floating || !drag.members.contains(&p.anchor)) {
-            return;
+            return (None, false);
         }
         if !float_only && !self.style.float_on_empty_drop {
-            return;
+            return (None, false);
         }
-        // No target: hosts that still apply their own policy for a whole-group release get it.
-        self.output.group_drop = Some((drag.panel.clone(), pointer));
         let rect = self.group_ghost(drag, pointer);
         let action = group_action(drag, Target::Float { rect: Some([rect.left(), rect.top(), rect.width(), rect.height()]) });
-        if self.layout.clone().apply_with_permissions(action.clone(), |p| self.permissions(p)).is_ok() {
-            self.output.actions.push(action);
-        }
+        let valid = self.layout.clone().apply_with_permissions(action.clone(), |p| self.permissions(p)).is_ok();
+        (valid.then_some(action), true)
     }
 
     /// The ghost at the pointer (a window moving live is its own ghost) under one destination
@@ -462,6 +468,12 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 labels.galley(pos2(x, strip.center().y - galley.size().y * 0.5), galley, self.style.text);
                 x += advance;
             }
+        }
+        // A window moving live is already where it goes.
+        if drag.gesture != GroupGesture::Window
+            && let (Some(action), _) = self.group_release(drag, pointer, float_only)
+        {
+            self.make_room(action, &drag.members);
         }
         if float_only || (drag.gesture == GroupGesture::Window && !self.title_bar_docks()) {
             return false;
@@ -545,6 +557,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     self.output.focused = Some(drag.panel);
                 }
             } else if let Some(action) = action {
+                self.make_room(action.clone(), std::slice::from_ref(&drag.panel));
                 let painter = self.preview_painter(ctx);
                 self.paint_dock_preview(ctx, &painter, action, std::slice::from_ref(&drag.panel), &drop);
                 self.paint_float_hint(ctx, pointer);
@@ -574,6 +587,17 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 }
             }
             return;
+        }
+        // The docked groups make room for what the release would do.
+        let moved = pointer.distance(drag.origin) >= 2.0 && !proposal.as_ref().is_some_and(|p| p.noop && !outside);
+        let intended = match (proposal.as_ref().filter(|_| !outside), floating_rect) {
+            _ if !moved => None,
+            (Some(p), _) => Some(Action::Move { panel: drag.panel.clone(), anchor: p.anchor.clone(), placement: p.placement.clone() }),
+            (None, Some(rect)) => Some(Action::Float { panel: drag.panel.clone(), rect: [rect.left(), rect.top(), rect.width(), rect.height()] }),
+            (None, None) => None,
+        };
+        if let Some(action) = intended {
+            self.make_room(action, std::slice::from_ref(&drag.panel));
         }
         let painter = self.preview_painter(ctx);
         if !float_only {

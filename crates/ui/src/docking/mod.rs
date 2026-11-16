@@ -31,7 +31,7 @@ pub use hits::{Divider, Hit, ResizeEdge};
 pub use model::{Action, DockError, Floating, Layout, Location, MAX_DEPTH, MAX_PANELS, Monitor, Node, Permissions, Placement, StackEntry, Zone};
 pub use render::{close_flyout, flyout, open_flyout};
 pub use surface::{
-    DockArea, DockContent, DockEvent, DockHeights, DockOutput, DockStyle, DropFeedback, DropRequest, FloatSpace, HidePanels, PanelLimits,
+    DockArea, DockContent, DockEvent, DockHeights, DockOutput, DockStyle, DropFeedback, DropRequest, FloatSpace, HidePanels, PanelLimits, TabClose,
     WindowFiles, WindowKind, begin_drag, cancel_drag, float_space, is_dragging, route_app_drag, send_keys, typing_window,
 };
 pub use targets::{

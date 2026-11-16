@@ -42,7 +42,7 @@ fn driver(style: impl Fn(&mut DockStyle) + 'static) -> Driver {
     DockDriver::new(frames(), Bodies::default()).with_style(style)
 }
 
-fn tab(d: &Driver, panel: u32) -> Rect {
+fn tab<C: DockContent<u32>>(d: &DockDriver<u32, C>, panel: u32) -> Rect {
     d.hit(&Hit::Tab(panel)).unwrap_or_else(|| panic!("tab {panel}"))
 }
 
@@ -187,4 +187,144 @@ fn a_tab_dragged_by_its_close_button_still_moves() {
     let out = d.drag(close, left.center());
     assert!(out.actions.iter().any(|a| matches!(a, Action::Move { panel: 3, anchor: 1, .. })), "{:?}", out.actions);
     assert!(!out.actions.iter().any(|a| matches!(a, Action::Close { .. })));
+}
+
+/// Bodies that each paint a marker well inside themselves, in a colour of their own, and a
+/// table of the ×s they ask for.
+#[derive(Default)]
+struct Marked {
+    closes: HashMap<u32, TabClose>,
+}
+
+impl DockContent<u32> for Marked {
+    fn body(&mut self, ui: &mut egui::Ui, panel: &u32) {
+        ui.painter().rect_filled(ui.max_rect().shrink(10.0), 0.0, marker(*panel));
+    }
+    fn tab_close(&self, panel: &u32) -> Option<TabClose> {
+        self.closes.get(panel).copied()
+    }
+}
+
+fn marker(panel: u32) -> egui::Color32 {
+    egui::Color32::from_rgb(200, 10 * panel as u8, 7)
+}
+
+/// Where `panel`'s marker was drawn in the last frame.
+fn marks(d: &DockDriver<u32, Marked>, panel: u32) -> Vec<Rect> {
+    d.shapes()
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            egui::Shape::Rect(shape) if shape.fill == marker(panel) => Some(shape.rect),
+            _ => None,
+        })
+        .collect()
+}
+
+fn mark(d: &DockDriver<u32, Marked>, panel: u32) -> Rect {
+    let found = marks(d, panel);
+    let [rect] = found[..] else { panic!("one marker of {panel}, not {found:?}") };
+    rect
+}
+
+const TIME: f32 = 0.2;
+
+/// Frames of 1/60 s until the animation is surely over, keeping the pointer at `at`; the
+/// marker of `panel` in each.
+fn follow(d: &mut DockDriver<u32, Marked>, at: Pos2, panel: u32) -> Vec<Rect> {
+    (0..(TIME * 60.0) as usize + 3)
+        .map(|_| {
+            d.move_to(at);
+            mark(d, panel)
+        })
+        .collect()
+}
+
+fn moves(seen: &[Rect]) -> usize {
+    seen.windows(2).filter(|w| w[0] != w[1]).count()
+}
+
+#[test]
+fn the_groups_make_room_for_a_drop_before_it_and_are_there_after_it() {
+    let mut d = DockDriver::new(frames(), Marked::default()).with_style(|style| style.preview_animation_time = TIME);
+    d.settle();
+    let before = mark(&d, 1);
+    // Over the left edge of the area, 3 would open a column before 1, which moves right.
+    let at = pos2(before.left() - 4.0, before.center().y);
+    d.hold(tab(&d, 3).center(), at);
+    let seen = follow(&mut d, at, 1);
+    let shown = *seen.last().unwrap();
+    assert!(shown.left() > before.left() + 20.0, "1 made room: {before:?} -> {shown:?}");
+    assert!(moves(&seen) > 3, "it slid over several frames, not {}", moves(&seen));
+    assert_eq!(seen[seen.len() - 2], shown, "and settled");
+    // The drop leaves it where the preview showed it.
+    let out = d.release(at);
+    assert!(out.actions.iter().any(|a| matches!(a, Action::MovePanel { panel: 3, .. })), "{:?}", out.actions);
+    d.move_to(at);
+    let dropped = mark(&d, 1);
+    // Contents keep their size while they slide, clipped to the room they will have, and lay
+    // out to it after the drop.
+    assert!((dropped.min - shown.min).length() < 0.5, "{shown:?} then {dropped:?}");
+    d.move_to(at);
+    assert_eq!(mark(&d, 1), dropped, "nothing moves after the drop");
+}
+
+#[test]
+fn escape_slides_the_groups_back() {
+    let mut d = DockDriver::new(frames(), Marked::default()).with_style(|style| style.preview_animation_time = TIME);
+    d.settle();
+    let before = mark(&d, 1);
+    let at = pos2(before.left() - 4.0, before.center().y);
+    d.hold(tab(&d, 3).center(), at);
+    let away = *follow(&mut d, at, 1).last().unwrap();
+    assert_ne!(away, before);
+    d.key(egui::Key::Escape);
+    let seen = follow(&mut d, at, 1);
+    assert!(moves(&seen) > 3, "it slid back over several frames");
+    assert_eq!(*seen.last().unwrap(), before, "back in place");
+    assert_eq!(d.layout, frames(), "nothing dropped");
+}
+
+#[test]
+fn the_dragged_panels_place_closes_up() {
+    let mut d = DockDriver::new(frames(), Marked::default()).with_style(|style| style.preview_animation_time = TIME);
+    d.settle();
+    let right = mark(&d, 3);
+    let left = mark(&d, 1);
+    // 1, alone on the left, joins the tabs on the right: its frame closes and the right one
+    // takes the whole width.
+    let at = right.center();
+    d.hold(tab(&d, 1).center(), at);
+    let seen = follow(&mut d, at, 3);
+    assert!(marks(&d, 1).is_empty(), "1's own place is hidden");
+    let shown = *seen.last().unwrap();
+    assert!((shown.left() - left.left()).abs() < 0.5, "the right frame moved over to the left edge: {shown:?}");
+    // Its frame fill grew to the whole width; the marker inside keeps its size.
+    assert_eq!(shown.size(), right.size());
+}
+
+#[test]
+fn without_an_animation_time_nothing_slides() {
+    let mut d = DockDriver::new(frames(), Marked::default());
+    d.settle();
+    let before = mark(&d, 1);
+    let at = pos2(before.left() - 4.0, before.center().y);
+    d.hold(tab(&d, 3).center(), at);
+    d.move_to(at);
+    assert_eq!(mark(&d, 1), before);
+}
+
+#[test]
+fn a_tab_may_show_its_close_button_disabled_or_none() {
+    let closes = HashMap::from([(1, TabClose::Disabled), (2, TabClose::Hidden)]);
+    let mut d = DockDriver::new(frames(), Marked { closes }).with_style(|style| style.tab_close_buttons = true);
+    d.settle();
+    // Disabled: drawn, taking no click.
+    let close = d.hit(&Hit::TabClose(1)).expect("a disabled × on 1");
+    let out = d.click(close.center());
+    assert!(!out.actions.iter().any(|a| matches!(a, Action::Close { .. })), "{:?}", out.actions);
+    assert!(d.layout.panels().contains(&&1));
+    // Hidden, though the panel may close; 3 by default has one that closes it.
+    assert!(d.hit(&Hit::TabClose(2)).is_none());
+    let close = d.hit(&Hit::TabClose(3)).expect("3's ×");
+    assert!(d.click(close.center()).actions.contains(&Action::Close { panel: 3 }));
 }

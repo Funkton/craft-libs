@@ -3,7 +3,7 @@ use std::{fmt::Debug, hash::Hash, sync::Arc};
 use egui::{Color32, Galley, Id, Key, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
 
 use super::{Renderer, clamp_float, stripless};
-use crate::docking::{Action, DockContent, DropTarget, GroupDrag, GroupGesture, Placement, Target, begin_drag, surface::TAB_PADDING};
+use crate::docking::{Action, DockContent, DropTarget, GroupDrag, GroupGesture, Placement, TabClose, Target, begin_drag, surface::TAB_PADDING};
 use crate::tabs;
 
 /// Where a group is drawn. It decides the drop targets the group offers and its gestures.
@@ -183,31 +183,48 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     /// and half the tab padding, for a closable panel; else nothing.
     fn close_width(&self, panel: &P) -> f32 {
         let size = self.style.tab_close_size;
-        if self.style.tab_close_buttons && self.permissions(panel).closable && size.is_finite() && size > 0.0 {
-            size + TAB_PADDING * 0.5
-        } else {
-            0.0
+        if self.tab_close(panel) != TabClose::Hidden && size.is_finite() && size > 0.0 { size + TAB_PADDING * 0.5 } else { 0.0 }
+    }
+
+    /// The × `panel`'s tab shows: [`crate::docking::DockContent::tab_close`], or by default one
+    /// that closes a closable panel. A locked area closes nothing.
+    fn tab_close(&self, panel: &P) -> TabClose {
+        if !self.style.tab_close_buttons {
+            return TabClose::Hidden;
+        }
+        let closable = self.permissions(panel).closable;
+        match self.content.tab_close(panel) {
+            Some(TabClose::Closes) | None if closable => TabClose::Closes,
+            Some(TabClose::Disabled) => TabClose::Disabled,
+            _ => TabClose::Hidden,
         }
     }
 
-    /// The × at the end of `tab`, drawn in `color` (the accent while hovered). True when clicked.
-    fn close_button(&mut self, ui: &mut Ui, panel: &P, tab: Rect, color: Color32) -> bool {
+    /// The × at the end of `tab`, drawn in `color` (the accent while hovered); a disabled one
+    /// is drawn faint and takes no click. True when clicked.
+    fn close_button(&mut self, ui: &mut Ui, panel: &P, tab: Rect, color: Color32, enabled: bool) -> bool {
         let size = self.style.tab_close_size;
         let center = pos2(tab.right() - TAB_PADDING * 0.5 - size * 0.5, tab.center().y);
         let hit = Rect::from_center_size(center, vec2(size, size)).intersect(tab);
         if !crate::docking::targets::usable(hit) {
             return false;
         }
-        let response = ui.interact(hit, self.id.with(("tab-close", panel)), Sense::click());
+        let response = ui.interact(hit, self.id.with(("tab-close", panel)), if enabled { Sense::click() } else { Sense::hover() });
         self.register_interaction(ui.ctx(), response.id);
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &self.style.close_label));
-        let color = if response.hovered() { self.style.accent } else { color };
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled && ui.is_enabled(), &self.style.close_label));
+        let color = if !enabled {
+            color.gamma_multiply(ui.visuals().disabled_alpha())
+        } else if response.hovered() {
+            self.style.accent
+        } else {
+            color
+        };
         let arm = hit.shrink(size * 0.25);
         let painter = ui.painter().with_clip_rect(tab.intersect(ui.clip_rect()));
         let stroke = Stroke::new(1.0, color);
         painter.line_segment([arm.left_top(), arm.right_bottom()], stroke);
         painter.line_segment([arm.right_top(), arm.left_bottom()], stroke);
-        response.clicked()
+        enabled && response.clicked()
     }
 
     /// A part of the strip the host draws (`header` or `extra-tabs`) at `rect`. A press in it
@@ -480,7 +497,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let response = if elided { response.on_hover_text(&label) } else { response };
         self.register_interaction(ui.ctx(), response.id);
         // Registered after the tab, so a press on × is the button's, not the tab's.
-        if close_width > 0.0 && self.close_button(ui, panel, rect, color) {
+        let close = self.tab_close(panel);
+        if close_width > 0.0 && self.close_button(ui, panel, rect, color, close == TabClose::Closes) {
             self.output.actions.push(Action::Close { panel: panel.clone() });
         }
         if response.is_pointer_button_down_on() || response.clicked_by(egui::PointerButton::Primary) {

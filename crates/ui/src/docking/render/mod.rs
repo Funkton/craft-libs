@@ -86,7 +86,10 @@ pub(in crate::docking) use dock::{GroupSize, fit_widths, group_heights};
 pub(in crate::docking) use floating::RESIZE_HANDLES;
 mod group;
 mod preview;
+mod room;
 mod sizes;
+
+pub(in crate::docking) use room::Painted;
 
 pub(in crate::docking) use sizes::{DROP_MARGIN, Drawn, RowItem, Sizer, row_drag, row_range};
 
@@ -115,6 +118,9 @@ pub(super) struct Renderer<'a, P> {
     pub(super) frame: FrameState<P>,
     /// [D] Flyout and iconic column state for this frame.
     pub(super) iconic: Iconic<P>,
+    /// The release this frame's drag would make, and the panels it moves: the docked groups
+    /// make room for it ([`Self::slide_units`]).
+    pub(super) room: Option<(Action<P>, Vec<P>)>,
     /// What a drag would float from each drawn panel, group and column, for commands.
     pub(super) float_space: crate::docking::FloatSpace<P>,
     /// Each panel's place in `layout`, and its entry in `float_space.contents`.

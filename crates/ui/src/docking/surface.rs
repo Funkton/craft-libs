@@ -158,6 +158,7 @@ pub struct DockStyle {
     /// A middle click on a tab closes its panel when the panel is closable.
     pub middle_click_closes_tabs: bool,
     /// Show × at the end of the tab of each closable panel; a click on it closes the panel.
+    /// [`DockContent::tab_close`] may hide it, or show it disabled, panel by panel.
     pub tab_close_buttons: bool,
     /// Side of the × of [`Self::tab_close_buttons`]; the tab grows by it and half the padding.
     pub tab_close_size: f32,
@@ -1003,6 +1004,22 @@ pub trait DockContent<P> {
     /// overflow of its own. Their widgets take their own input as the header's do, and a press
     /// among them focuses the shown panel. A drop on them adds the panel after the last panel tab.
     fn group_extra_tabs(&mut self, _ui: &mut Ui, _panels: &[P], _active: &P, _floating: bool) {}
+    /// The × on `panel`'s tab while [`DockStyle::tab_close_buttons`] is on. `None` shows it
+    /// when the panel is closable ([`Permissions::closable`]).
+    fn tab_close(&self, _panel: &P) -> Option<TabClose> {
+        None
+    }
+}
+
+/// The × on a panel's tab, see [`DockContent::tab_close`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabClose {
+    /// No ×; the tab takes no room for one.
+    Hidden,
+    /// A × that closes the panel. A panel that may not close, or a locked area, shows none.
+    Closes,
+    /// A × shown disabled, for a close the application has not built yet.
+    Disabled,
 }
 
 /// Host-owned drop resolution request, see [`DockContent::resolve_drag`].
@@ -1104,6 +1121,9 @@ impl<P, C: DockContent<P> + ?Sized> DockContent<P> for Overrides<'_, P, C> {
     }
     fn resolve_drag(&mut self, ctx: &Context, style: &DockStyle, request: &DropRequest<'_, P>) -> Option<DropFeedback> {
         self.inner.resolve_drag(ctx, style, request)
+    }
+    fn tab_close(&self, panel: &P) -> Option<TabClose> {
+        self.inner.tab_close(panel)
     }
     fn label(&mut self, ui: &Ui, panel: &P, logical: &str, font: &FontId, color: Color32) -> egui::WidgetText {
         self.inner.label(ui, panel, logical, font, color)
@@ -1396,6 +1416,7 @@ impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
             output: DockOutput::default(),
             frame,
             iconic: super::render::Iconic::new(self.auto_collapse),
+            room: None,
             float_space: FloatSpace { contents, side_edge_zones: style.side_edge_zones, ..FloatSpace::new(rect) },
             places,
             contents: content_index,
@@ -1409,8 +1430,14 @@ impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
             #[cfg(feature = "native-windows")]
             window_system: self.window_system,
         };
+        // The docked tree's shapes, which slide while a drag makes room. A maximized or hidden
+        // panel draws another tree than the layout's, and nothing slides.
+        let mut painted = None;
         if let Some(root) = &view.root {
+            let (layer, start) = (ui.layer_id(), super::render::Painted::next(ui.ctx(), ui.layer_id()));
             renderer.node(ui, root, rect, &mut Vec::new(), (root, rect));
+            let end = super::render::Painted::next(ui.ctx(), layer);
+            painted = (view.root.as_ref() == layout.root.as_ref()).then_some(super::render::Painted { layer, start, end });
             ui.allocate_rect(rect, Sense::hover());
         }
         renderer.flyout(ui.ctx());
@@ -1419,6 +1446,7 @@ impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
         renderer.finish_window_drag(ui);
         renderer.finish_group_drag(ui);
         renderer.finish_drag(ui.ctx());
+        renderer.slide_units(ui.ctx(), painted);
         #[cfg(feature = "native-windows")]
         renderer.end_cross(ui.ctx());
         renderer.report_flyout(ui.ctx());
