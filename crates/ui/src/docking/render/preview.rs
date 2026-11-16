@@ -38,6 +38,40 @@ pub(super) const MIN_FITTED_HEIGHT: f32 = 120.0;
 /// frame: the window draws before the preview.
 pub(super) const GROUP_HIGHLIGHTED: &str = "group-drag-highlighted";
 
+/// The landing outline being drawn: moving from `from` to `to` since `start`, last drawn on
+/// pass `pass`.
+#[derive(Clone, Copy, Debug)]
+struct Landing {
+    from: Rect,
+    to: Rect,
+    start: f64,
+    pass: u64,
+}
+
+/// The ghost of a dragged tab: the tab's colors and label, outlined in the accent. Painted on
+/// the preview layer when dropped, so that it lies over every preview `finish_drag` drew.
+struct GhostOnTop {
+    ctx: Context,
+    id: egui::Id,
+    rect: Rect,
+    label: String,
+    font: egui::FontId,
+    fill: egui::Color32,
+    text: egui::Color32,
+    accent: egui::Color32,
+}
+
+impl Drop for GhostOnTop {
+    fn drop(&mut self) {
+        let painter = self.ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, self.id.with("drop-preview")));
+        painter.rect_filled(self.rect, 0.0, self.fill);
+        painter.rect_stroke(self.rect, 0.0, egui::Stroke::new(1.0, self.accent), egui::StrokeKind::Inside);
+        let galley = painter.layout_no_wrap(std::mem::take(&mut self.label), self.font.clone(), self.text);
+        let at = pos2(self.rect.left() + TAB_PADDING * 0.5, self.rect.center().y - galley.size().y * 0.5);
+        painter.with_clip_rect(self.rect.shrink(1.0)).galley(at, galley, self.text);
+    }
+}
+
 /// What finishing a drag reads of the pointer, in the coordinates of the window finishing it.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DragInput {
@@ -408,8 +442,11 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     pub(super) fn paint_group_drag(&mut self, ui: &Ui, drag: &GroupDrag<P>, pointer: Pos2, float_only: bool) -> bool {
         let ctx = ui.ctx();
         let painter = self.preview_painter(ctx);
+        // A window moving live is its own ghost: its outline starts in place.
+        self.landing_from(ctx, Rect::NOTHING);
         if drag.gesture != GroupGesture::Window {
             let ghost = self.group_ghost(drag, pointer);
+            self.landing_from(ctx, ghost);
             drop_preview(&painter, ghost, self.style.accent, true);
             let strip = Rect::from_min_size(ghost.min, vec2(ghost.width(), self.style.tab_height.min(ghost.height())));
             let labels = painter.with_clip_rect(strip.shrink(2.0));
@@ -486,6 +523,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
         let float_only = input.command || drag.undock;
         let outside = gone || !ctx.content_rect().contains(pointer);
+        let ghost = (!released && self.style.drag_ghost).then(|| self.tab_ghost(&drag, pointer));
+        self.landing_from(ctx, ghost.unwrap_or(drag.tab));
+        let _ghost = ghost.map(|rect| self.ghost_on_top(ctx, &drag.panel, rect));
         let empty_drop =
             self.style.float_on_empty_drop && (!drag.source.contains(pointer) || self.layout.floating.iter().any(|g| g.contains(&drag.panel)));
         let floatable = self.permissions(&drag.panel).floatable && (float_only || outside || empty_drop);
@@ -540,8 +580,71 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             self.paint_tab_proposal(ctx, &painter, &drag, proposal.as_ref(), pointer);
         }
         if let (None, Some(rect)) = (&proposal, floating_rect) {
-            drop_preview(&painter, rect, self.style.accent, false);
+            drop_preview(&painter, self.landing(ctx, rect), self.style.accent, false);
         }
+    }
+
+    /// Where the ghost of a dragged tab is drawn: the tab's size, held where the pointer took
+    /// hold of it. A drag that no tab started (an icon) has a tab-high ghost of the narrowest
+    /// tab width.
+    fn tab_ghost(&self, drag: &Drag<P>, pointer: Pos2) -> Rect {
+        if crate::docking::targets::usable(drag.tab) {
+            Rect::from_min_size(pointer - (drag.origin - drag.tab.min), drag.tab.size())
+        } else {
+            let size = vec2(self.style.min_tab_width, self.style.tab_height);
+            Rect::from_min_size(pointer - drag.grab.min(size), size)
+        }
+    }
+
+    /// The ghost of the dragged tab at `rect`, painted when the returned guard drops: over the
+    /// preview the rest of the frame draws.
+    fn ghost_on_top(&self, ctx: &Context, panel: &P, rect: Rect) -> GhostOnTop {
+        GhostOnTop {
+            ctx: ctx.clone(),
+            id: self.id,
+            rect,
+            label: self.label_of(panel),
+            font: self.style.font.clone(),
+            fill: self.style.active_background,
+            text: self.style.text,
+            accent: self.style.accent,
+        }
+    }
+
+    /// Where this frame's landing outline starts from when it first shows: the ghost.
+    fn landing_from(&self, ctx: &Context, rect: Rect) {
+        ctx.data_mut(|d| d.insert_temp(self.id.with("landing-from"), rect));
+    }
+
+    /// The landing outline of a drag moving to `rect` over
+    /// [`crate::docking::DockStyle::preview_animation_time`], drawn at the returned rect: from
+    /// the ghost when it first shows, and from where it was drawn when the target changes.
+    pub(super) fn landing(&self, ctx: &Context, rect: Rect) -> Rect {
+        let duration = self.style.preview_animation_time;
+        if !(duration.is_finite() && duration > 0.0 && crate::docking::targets::usable(rect)) {
+            return rect;
+        }
+        let key = self.id.with("landing");
+        let (now, pass) = (ctx.input(|i| i.time), ctx.cumulative_pass_nr());
+        let shown = |landing: &Landing| {
+            let t = ((now - landing.start) as f32 / duration).clamp(0.0, 1.0);
+            // Ease out: quick to start, settling into place.
+            landing.from.lerp_towards(&landing.to, 1.0 - (1.0 - t).powi(3))
+        };
+        // An outline drawn this pass or the last continues; any other starts at the ghost.
+        let landing = match ctx.data(|d| d.get_temp::<Landing>(key)).filter(|l| l.pass + 1 >= pass) {
+            Some(landing) if landing.to == rect => landing,
+            Some(landing) => Landing { from: shown(&landing), to: rect, start: now, pass },
+            None => {
+                let from = ctx.data(|d| d.get_temp::<Rect>(self.id.with("landing-from")));
+                Landing { from: from.filter(|r| crate::docking::targets::usable(*r)).unwrap_or(rect), to: rect, start: now, pass }
+            }
+        };
+        ctx.data_mut(|d| d.insert_temp(key, Landing { pass, ..landing }));
+        if now - landing.start < f64::from(duration) {
+            ctx.request_repaint();
+        }
+        shown(&landing)
     }
 
     /// The group target a single tab drag would take at `pointer`.
@@ -595,19 +698,20 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         action: impl Fn(Target<P>) -> Action<P>,
     ) {
         if crate::docking::targets::usable(proposal.preview) {
+            let landing = |rect| self.landing(ctx, rect);
             let beside = matches!(proposal.placement, Placement::Split(zone) | Placement::SplitSized { zone, .. } if zone != Zone::Center);
             if self.style.side_edge_zones {
-                drop_preview(painter, proposal.preview.shrink(1.0), self.style.accent, filled);
+                drop_preview(painter, landing(proposal.preview.shrink(1.0)), self.style.accent, filled);
             } else if matches!(proposal.placement, Placement::Edge(_)) {
-                self.paint_drop_line(ctx, proposal.preview, true);
+                self.paint_drop_line(ctx, landing(proposal.preview), true);
             } else if beside {
                 let to = Target::At { anchor: proposal.anchor.clone(), placement: proposal.placement.clone() };
                 match self.result_rect(action(to), members) {
-                    Some(rect) => tab_outline(painter, rect.shrink(1.0), self.style.accent),
-                    None => self.paint_drop_line(ctx, proposal.preview, false),
+                    Some(rect) => tab_outline(painter, landing(rect.shrink(1.0)), self.style.accent),
+                    None => self.paint_drop_line(ctx, landing(proposal.preview), false),
                 }
             } else {
-                tab_outline(painter, proposal.preview.shrink(1.0), self.style.accent);
+                tab_outline(painter, landing(proposal.preview.shrink(1.0)), self.style.accent);
             }
         }
         self.paint_marker(painter, proposal);
@@ -620,8 +724,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     fn paint_dock_preview(&self, ctx: &Context, painter: &egui::Painter, action: Action<P>, members: &[P], drop: &DockDrop<P>) {
         let rect = (!self.style.side_edge_zones && !drop.outer).then_some(action).and_then(|action| self.result_rect(action, members));
         match rect {
-            Some(rect) => tab_outline(painter, rect.shrink(1.0), self.style.accent),
-            None => self.paint_drop_line(ctx, drop.line, drop.outer),
+            Some(rect) => tab_outline(painter, self.landing(ctx, rect.shrink(1.0)), self.style.accent),
+            None => self.paint_drop_line(ctx, self.landing(ctx, drop.line), drop.outer),
         }
     }
 

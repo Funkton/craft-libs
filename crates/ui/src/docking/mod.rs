@@ -47,6 +47,8 @@ mod command_tests;
 #[cfg(test)]
 mod dock_tests;
 #[cfg(test)]
+mod drag_feedback_tests;
+#[cfg(test)]
 mod drop_tests;
 #[cfg(test)]
 mod floating_tests;

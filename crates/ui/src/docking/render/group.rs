@@ -104,6 +104,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     .size()
                     .x
                     + TAB_PADDING
+                    + self.close_width(p)
             })
             .collect();
         let wanted = self.content.group_extra_tabs_width(panels, selected, floating);
@@ -176,6 +177,37 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
         ui.painter().rect_stroke(rect, 0.0, self.style.border, StrokeKind::Inside);
         false
+    }
+
+    /// What a tab grows by for its × ([`crate::docking::DockStyle::tab_close_buttons`]): the ×
+    /// and half the tab padding, for a closable panel; else nothing.
+    fn close_width(&self, panel: &P) -> f32 {
+        let size = self.style.tab_close_size;
+        if self.style.tab_close_buttons && self.permissions(panel).closable && size.is_finite() && size > 0.0 {
+            size + TAB_PADDING * 0.5
+        } else {
+            0.0
+        }
+    }
+
+    /// The × at the end of `tab`, drawn in `color` (the accent while hovered). True when clicked.
+    fn close_button(&mut self, ui: &mut Ui, panel: &P, tab: Rect, color: Color32) -> bool {
+        let size = self.style.tab_close_size;
+        let center = pos2(tab.right() - TAB_PADDING * 0.5 - size * 0.5, tab.center().y);
+        let hit = Rect::from_center_size(center, vec2(size, size)).intersect(tab);
+        if !crate::docking::targets::usable(hit) {
+            return false;
+        }
+        let response = ui.interact(hit, self.id.with(("tab-close", panel)), Sense::click());
+        self.register_interaction(ui.ctx(), response.id);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &self.style.close_label));
+        let color = if response.hovered() { self.style.accent } else { color };
+        let arm = hit.shrink(size * 0.25);
+        let painter = ui.painter().with_clip_rect(tab.intersect(ui.clip_rect()));
+        let stroke = Stroke::new(1.0, color);
+        painter.line_segment([arm.left_top(), arm.right_bottom()], stroke);
+        painter.line_segment([arm.right_top(), arm.left_bottom()], stroke);
+        response.clicked()
     }
 
     /// A part of the strip the host draws (`header` or `extra-tabs`) at `rect`. A press in it
@@ -427,7 +459,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let label = self.label_of(panel);
         let visual_active = active && !owner.is_some_and(|owner| self.content.group_collapsed(owner.panels));
         let color = if visual_active { self.style.text } else { self.style.inactive_text };
-        let galley = self.tab_label(ui, panel, &label, color, (rect.width() - TAB_PADDING).max(0.0));
+        let close_width = self.close_width(panel);
+        let galley = self.tab_label(ui, panel, &label, color, (rect.width() - TAB_PADDING - close_width).max(0.0));
         let elided = galley.elided;
         let tab_id = self.id.with(("tab", panel));
         let pointer_focus = self.pointer_focus(ui, tab_id);
@@ -446,6 +479,10 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             });
         let response = if elided { response.on_hover_text(&label) } else { response };
         self.register_interaction(ui.ctx(), response.id);
+        // Registered after the tab, so a press on × is the button's, not the tab's.
+        if close_width > 0.0 && self.close_button(ui, panel, rect, color) {
+            self.output.actions.push(Action::Close { panel: panel.clone() });
+        }
         if response.is_pointer_button_down_on() || response.clicked_by(egui::PointerButton::Primary) {
             ui.ctx().data_mut(|d| d.insert_temp(tab_id.with("pointer-focus"), true));
         }
@@ -476,6 +513,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             self.output.actions.push(Action::Close { panel: panel.clone() });
         }
         if policy.movable && response.drag_started() && begin_drag(ui.ctx(), self.id, panel.clone(), group) {
+            crate::docking::surface::set_drag_tab::<P>(ui.ctx(), self.id, rect);
             self.latch_undock(ui.ctx(), owner.map(|owner| owner.kind));
         }
         response.context_menu(|ui| {

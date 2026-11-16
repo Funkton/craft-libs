@@ -157,6 +157,16 @@ pub struct DockStyle {
     pub wheel_selects_tabs: bool,
     /// A middle click on a tab closes its panel when the panel is closable.
     pub middle_click_closes_tabs: bool,
+    /// Show × at the end of the tab of each closable panel; a click on it closes the panel.
+    pub tab_close_buttons: bool,
+    /// Side of the × of [`Self::tab_close_buttons`]; the tab grows by it and half the padding.
+    pub tab_close_size: f32,
+    /// While a tab is dragged, a ghost of it follows the pointer where the pointer took hold
+    /// of it. Group drags always show their ghost.
+    pub drag_ghost: bool,
+    /// Seconds the landing outline of a drag takes to move into place: from the ghost when it
+    /// first shows, then from where it was each time the target changes. 0 shows it in place.
+    pub preview_animation_time: f32,
 }
 
 impl Default for DockStyle {
@@ -242,6 +252,10 @@ impl DockStyle {
             close_button: true,
             wheel_selects_tabs: false,
             middle_click_closes_tabs: false,
+            tab_close_buttons: false,
+            tab_close_size: 12.0,
+            drag_ghost: false,
+            preview_animation_time: 0.0,
         }
     }
 
@@ -702,6 +716,8 @@ pub(super) struct Drag<P> {
     pub(super) origin: Pos2,
     pub(super) source: Rect,
     pub(super) grab: Vec2,
+    /// The dragged tab, when a tab started the drag ([`set_drag_tab`]); its ghost has this size.
+    pub(super) tab: Rect,
     /// Ctrl/Cmd held at the press, with [`DockStyle::command_press_floats`]: the drop floats.
     pub(super) undock: bool,
 }
@@ -738,8 +754,16 @@ pub fn begin_drag<P: Clone + Send + Sync + 'static>(ctx: &Context, area_id: Id, 
         return false;
     }
     let grab = (origin - source_rect.min).clamp(Vec2::ZERO, source_rect.size());
-    ctx.data_mut(|d| d.insert_temp(area_id.with("drag"), Drag { panel, origin, source: source_rect, grab, undock: false }));
+    ctx.data_mut(|d| d.insert_temp(area_id.with("drag"), Drag { panel, origin, source: source_rect, grab, tab: Rect::NOTHING, undock: false }));
     true
+}
+
+/// Record the tab that started this area's drag, for its ghost ([`DockStyle::drag_ghost`]).
+pub(super) fn set_drag_tab<P: Clone + Send + Sync + 'static>(ctx: &Context, area_id: Id, tab: Rect) {
+    let key = area_id.with("drag");
+    if let Some(drag) = ctx.data(|d| d.get_temp::<Drag<P>>(key)) {
+        ctx.data_mut(|d| d.insert_temp(key, Drag { tab, ..drag }));
+    }
 }
 
 /// Whether this area's tab or group gesture is active.
